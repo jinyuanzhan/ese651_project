@@ -71,7 +71,7 @@ import src.isaac_quad_sim2real.tasks   # noqa: F401
 
 def main():
     """Play with RSL-RL agent."""
-    # parse configuration
+    # parse configuratio
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
     env_cfg = parse_env_cfg(
         args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric
