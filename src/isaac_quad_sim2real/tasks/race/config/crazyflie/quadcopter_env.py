@@ -194,7 +194,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     min_altitude = 0.1
     max_altitude = 3.0
     max_time_on_ground = 1.5
-    out_of_bounds_margin_xy = 4.0
+    out_of_bounds_margin_xy = 6.0
 
     # motor dynamics
     arm_length = 0.043
@@ -220,6 +220,8 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
 
     # Parameters from train.py or play.py
     is_train = None
+    use_curriculum_reset = True
+    use_privileged_critic = False
 
     k_aero_xy = 9.1785e-7
     k_aero_z = 10.311e-7
@@ -632,6 +634,10 @@ class QuadcopterEnv(DirectRLEnv):
     ##########################################################
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        # Reset-only metrics are written into extras["log"] during _reset_idx().
+        # Clear the previous step's payload so the runner only sees fresh episode logs.
+        self.extras.pop("log", None)
+
         self._actions = actions.clone().clamp(-1.0, 1.0)    # actions come directly from the NN
         self._actions = self.cfg.beta * self._actions + (1 - self.cfg.beta) * self._previous_actions
 
@@ -658,6 +664,7 @@ class QuadcopterEnv(DirectRLEnv):
         lin_vel_b = self._robot.data.root_com_lin_vel_b
         theta_dot = torch.sum(self._motor_speeds, dim=1, keepdim=True)
         drag = -theta_dot * self._K_aero.unsqueeze(0) * lin_vel_b
+        # drag = -theta_dot * self._K_aero * lin_vel_b
 
         self._thrust[:, 0, :] = drag
         self._thrust[:, 0, 2] += wrench[:, 0]
@@ -680,17 +687,14 @@ class QuadcopterEnv(DirectRLEnv):
         cond_max_h = self._robot.data.root_link_pos_w[:, 2] > self.cfg.max_altitude
 
         # self._crashed is computed in get_rewards() in quadcopter_strategies.py.
-        cond_crashed = self._crashed > 20
+        cond_crashed = self._crashed > 10
 
         #TODO ----- START ----- [OPTIONAL]
         # Consider adding additional _get_dones() conditions to influence training. Note that the additional conditions
         # will not be used during runtime for the official class race.
+        # Temporary debugging rollback: keep the boundary bookkeeping/logging path,
+        # but do not terminate training episodes due to x/y out-of-bounds.
         cond_out_of_bounds_xy = torch.zeros_like(cond_max_h)
-        if self.cfg.is_train:
-            drone_pos_xy = self._robot.data.root_link_pos_w[:, :2]
-            cond_out_of_bounds_xy = (
-                (drone_pos_xy < self._bounds_min_xy) | (drone_pos_xy > self._bounds_max_xy)
-            ).any(dim=1)
         #TODO ----- END ----- [OPTIONAL]
         self._out_of_bounds[:] = cond_out_of_bounds_xy
 

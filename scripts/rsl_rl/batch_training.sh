@@ -35,7 +35,8 @@ for seed in 1 2 3; do
         --max_iterations 5000 \
         --headless \
         --logger wandb \
-        --seed $seed
+        --seed $seed \
+        --disable_curriculum_reset
     echo "Finished run with seed $seed"
 
     wait

@@ -10,11 +10,11 @@ from .rl_cfg import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgo
 
 @configclass
 class QuadcopterPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 48
+    num_steps_per_env = 24
     max_iterations = 200
     save_interval = 50
     experiment_name = "quadcopter_direct"
-    empirical_normalization = True
+    empirical_normalization = False
     logger = "wandb"
     wandb_project = "ese651_quadcopter"
     policy = RslRlPpoActorCriticCfg(
@@ -22,18 +22,18 @@ class QuadcopterPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         actor_hidden_dims=[128, 128],
         critic_hidden_dims=[512, 256, 128, 128],
         activation="elu",
-        min_std=0.01,
+        min_std=0,
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
-        num_learning_epochs=8,
+        entropy_coef=0,
+        num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",
-        gamma=0.993,
+        gamma=0.99,
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,

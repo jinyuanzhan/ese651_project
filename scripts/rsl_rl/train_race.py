@@ -34,6 +34,25 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument(
+    "--disable_curriculum_reset",
+    action="store_true",
+    default=False,
+    help="Disable reset curriculum and always start training episodes from gate 0.",
+)
+parser.add_argument(
+    "--reward_set",
+    type=str,
+    default="baseline",
+    choices={"baseline", "trial1", "trial2"},
+    help="Reward preset to use for training.",
+)
+parser.add_argument(
+    "--privileged_critic",
+    action="store_true",
+    default=False,
+    help="Enable asymmetric actor-critic with privileged observations for the critic.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -81,8 +100,82 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+#     113 -    #     'gate_pass_reward_scale': 100.0,      # sparse bonus for passing a gate
+#     114 -    #     'progress_reward_scale': 10.0,         # dense shaping toward current gate
+#     115 -    #     'vel_align_reward_scale': 1.2,        # fly toward gate, not hover
+#     116 -    #     'speed_reward_scale': 0.5,            # encourage fast flight
+#     117 -    #     'entry_half_plane_reward_scale': 3.0, # small bonus for re-entering the valid approach side
+#     118 -    #     'crash_reward_scale': -5.0,           # collision penalty
+#     119 -    #     'action_smooth_reward_scale': -0.05,  # prevent oscillation
+#     120 -    #     'altitude_reward_scale': -2.0,        # avoid ground
+#     121 -    #     'lateral_reward_scale': 0,         # stay near gate center without over-penalizing hairpins
+#     122 -    #     'death_cost': -80.0,                  # termination penalty
 
+REWARD_PRESETS = {
+    "baseline": {
+        "gate_pass_reward_scale": 80.0,
+        "progress_reward_scale": 10.0,
+        "speed_reward_scale": 0,
+        # "entry_half_plane_reward_scale": 3.0,
+        # "crash_reward_scale": -5.0,
+        "action_smooth_reward_scale": 0,
+        # "altitude_reward_scale": -2.0,
+        # "lateral_reward_scale": 0.0,
+        "time_reward_scale": -0.01, # time penalty
+        "death_cost": -100.0,
+    },
+    # "trial1": {
+    #     "gate_pass_reward_scale": 80.0,
+    #     "progress_reward_scale": 6.0,
+    #     "speed_reward_scale": 0.5,
+    #     # "entry_half_plane_reward_scale": 5.0,
+    #     # "crash_reward_scale": -2.0,
+    #     "action_smooth_reward_scale": -0.03,
+    #     # "altitude_reward_scale": -1.5,
+    #     # "lateral_reward_scale": 0.0,
+    #     "time_reward_scale": -0.01,
+    #     "death_cost": -30.0,
+    # },
+    # "trial2": {
+    #     "gate_pass_reward_scale": 80.0,
+    #     "progress_reward_scale": 5.0,
+    #     "speed_reward_scale": 0.5,
+    #     # "entry_half_plane_reward_scale": 1.5,
+    #     # "crash_reward_scale": -4.0,
+    #     "action_smooth_reward_scale": -0.03,
+    #     # "altitude_reward_scale": -1.5,
+    #     # "lateral_reward_scale": 0.0,
+    #     "time_reward_scale": -0.01,
+    #     "death_cost": -60.0,
+    # },
+}
 
+#    111 -    # # Reward scales for 8-component reward structure
+#     112 -    # rewards = {
+#     113 -    #     'gate_pass_reward_scale': 100.0,      # sparse bonus for passing a gate
+#     114 -    #     'progress_reward_scale': 10.0,         # dense shaping toward current gate
+#     115 -    #     'vel_align_reward_scale': 1.2,        # fly toward gate, not hover
+#     116 -    #     'speed_reward_scale': 0.5,            # encourage fast flight
+#     117 -    #     'entry_half_plane_reward_scale': 3.0, # small bonus for re-entering the valid approach side
+#     118 -    #     'crash_reward_scale': -5.0,           # collision penalty
+#     119 -    #     'action_smooth_reward_scale': -0.05,  # prevent oscillation
+#     120 -    #     'altitude_reward_scale': -2.0,        # avoid ground
+#     121 -    #     'lateral_reward_scale': 0,         # stay near gate center without over-penalizing hairpins
+#     122 -    #     'death_cost': -80.0,                  # termination penalty
+#     123 -    # }
+#     124 -    rewards = {
+#     125 -    'gate_pass_reward_scale': 20.0,
+#     126 -    'progress_reward_scale': 8.0,
+#     127 -    'vel_align_reward_scale': 1.0,
+#     128 -    'speed_reward_scale': 0.3,
+#     129 -    'entry_half_plane_reward_scale': 5.0,
+#     130 -    'crash_reward_scale': -2.0,
+#     131 -    'action_smooth_reward_scale': -0.03,
+#     132 -    'altitude_reward_scale': -1.5,
+#     133 -    'lateral_reward_scale': 0.0,
+#     134 -    'time_reward_scale': -0.1,
+#     135 -    'death_cost': -25.0,
+#     136 -}
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Train with RSL-RL agent."""
@@ -108,35 +201,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
 
-    # # Reward scales for 8-component reward structure
-    # rewards = {
-    #     'gate_pass_reward_scale': 100.0,      # sparse bonus for passing a gate
-    #     'progress_reward_scale': 10.0,         # dense shaping toward current gate
-    #     'vel_align_reward_scale': 1.2,        # fly toward gate, not hover
-    #     'speed_reward_scale': 0.5,            # encourage fast flight
-    #     'entry_half_plane_reward_scale': 3.0, # small bonus for re-entering the valid approach side
-    #     'crash_reward_scale': -5.0,           # collision penalty
-    #     'action_smooth_reward_scale': -0.05,  # prevent oscillation
-    #     'altitude_reward_scale': -2.0,        # avoid ground
-    #     'lateral_reward_scale': 0,         # stay near gate center without over-penalizing hairpins
-    #     'death_cost': -80.0,                  # termination penalty
-    # }
-    rewards = {
-    'gate_pass_reward_scale': 20.0,
-    'progress_reward_scale': 8.0,
-    'vel_align_reward_scale': 1.0,
-    'speed_reward_scale': 0.3,
-    'entry_half_plane_reward_scale': 5.0,
-    'crash_reward_scale': -2.0,
-    'action_smooth_reward_scale': -0.03,
-    'altitude_reward_scale': -1.5,
-    'lateral_reward_scale': 0.0,
-    'time_reward_scale': -0.1,
-    'death_cost': -25.0,
-}
+    rewards = REWARD_PRESETS[args_cli.reward_set].copy()
+    print(f"[INFO] Using reward preset: {args_cli.reward_set}")
+    print_dict(rewards, nesting=4)
 
     env_cfg.is_train = True
     env_cfg.rewards = rewards
+    env_cfg.use_curriculum_reset = not args_cli.disable_curriculum_reset
+    env_cfg.use_privileged_critic = args_cli.privileged_critic
+    print(f"[INFO] Reset curriculum enabled: {env_cfg.use_curriculum_reset}")
+    print(f"[INFO] Privileged critic enabled: {env_cfg.use_privileged_critic}")
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None, rewards=rewards)
