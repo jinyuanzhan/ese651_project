@@ -194,6 +194,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     min_altitude = 0.1
     max_altitude = 3.0
     max_time_on_ground = 1.5
+    out_of_bounds_margin_xy = 4.0
 
     # motor dynamics
     arm_length = 0.043
@@ -243,6 +244,7 @@ class QuadcopterEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         self.iteration = 0
+        self.total_training_iterations = 1
 
         if len(cfg.rewards) > 0:
             self.rew = cfg.rewards
@@ -272,6 +274,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._n_gates_passed = torch.zeros(self.num_envs, device=self.device, dtype=torch.int)
 
         self._crashed = torch.zeros(self.num_envs, device=self.device, dtype=torch.int)
+        self._out_of_bounds = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
 
         # Motor dynamics
         self.cfg.thrust_to_weight = 3.15
@@ -345,8 +348,10 @@ class QuadcopterEnv(DirectRLEnv):
 
         self.set_debug_vis(self.cfg.debug_vis)
 
-    def update_iteration(self, iter):
+    def update_iteration(self, iter, total_iterations: int | None = None):
         self.iteration = iter
+        if total_iterations is not None:
+            self.total_training_iterations = max(1, int(total_iterations))
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first time
@@ -433,6 +438,10 @@ class QuadcopterEnv(DirectRLEnv):
         }
 
         self._waypoints = torch.tensor(tracks[self.cfg.track_name], device=self.device)
+        gate_half = self._gate_model_cfg_data.gate_side / 2
+        boundary_padding = gate_half + self.cfg.out_of_bounds_margin_xy
+        self._bounds_min_xy = self._waypoints[:, :2].amin(dim=0) - boundary_padding
+        self._bounds_max_xy = self._waypoints[:, :2].amax(dim=0) + boundary_padding
 
         self._normal_vectors = torch.zeros(self._waypoints.shape[0], 3, device=self.device)
         self._waypoints_quat = torch.zeros(self._waypoints.shape[0], 4, device=self.device)
@@ -671,17 +680,25 @@ class QuadcopterEnv(DirectRLEnv):
         cond_max_h = self._robot.data.root_link_pos_w[:, 2] > self.cfg.max_altitude
 
         # self._crashed is computed in get_rewards() in quadcopter_strategies.py.
-        cond_crashed = self._crashed > 100
+        cond_crashed = self._crashed > 20
 
         #TODO ----- START ----- [OPTIONAL]
         # Consider adding additional _get_dones() conditions to influence training. Note that the additional conditions
         # will not be used during runtime for the official class race.
+        cond_out_of_bounds_xy = torch.zeros_like(cond_max_h)
+        if self.cfg.is_train:
+            drone_pos_xy = self._robot.data.root_link_pos_w[:, :2]
+            cond_out_of_bounds_xy = (
+                (drone_pos_xy < self._bounds_min_xy) | (drone_pos_xy > self._bounds_max_xy)
+            ).any(dim=1)
         #TODO ----- END ----- [OPTIONAL]
+        self._out_of_bounds[:] = cond_out_of_bounds_xy
 
         died = (
             cond_max_h
           | cond_h_min_time
           | cond_crashed
+          | cond_out_of_bounds_xy
         )
 
         # timeout conditions

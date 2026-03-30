@@ -157,7 +157,7 @@ class OnPolicyRunner:
         start_iter = self.current_learning_iteration
         tot_iter = start_iter + num_learning_iterations
         for it in range(start_iter, tot_iter):
-            self.env.unwrapped.update_iteration(self.current_learning_iteration)
+            self.env.unwrapped.update_iteration(it, tot_iter)
             start = time.time()
             # Rollout
             with torch.inference_mode():
@@ -304,6 +304,41 @@ class OnPolicyRunner:
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
 
         # -- Training
+        self.writer.add_scalar("Train/total_timesteps", self.tot_timesteps, locs["it"])
+
+        env_unwrapped = getattr(self.env, "unwrapped", None)
+        if env_unwrapped is not None and hasattr(env_unwrapped, "_n_gates_passed"):
+            self.writer.add_scalar(
+                "Train/mean_active_progress_index",
+                env_unwrapped._n_gates_passed.float().mean().item(),
+                locs["it"],
+            )
+        if env_unwrapped is not None and hasattr(env_unwrapped, "_idx_wp"):
+            self.writer.add_scalar(
+                "Train/mean_active_target_gate",
+                env_unwrapped._idx_wp.float().mean().item(),
+                locs["it"],
+            )
+        strategy = getattr(env_unwrapped, "strategy", None) if env_unwrapped is not None else None
+        if strategy is not None and hasattr(strategy, "_gate_pass_counts_total"):
+            self.writer.add_scalar(
+                "Train/mean_active_episode_gate_passes",
+                strategy._episode_gate_pass_counts.sum(dim=1).mean().item(),
+                locs["it"],
+            )
+            for gate_idx in range(len(strategy._gate_pass_counts_total)):
+                self.writer.add_scalar(
+                    f"GatePass/count_gate_{gate_idx}",
+                    strategy._gate_pass_counts_total[gate_idx].item(),
+                    locs["it"],
+                )
+                self.writer.add_scalar(
+                    f"GatePass/count_gate_{gate_idx}_iter",
+                    strategy._gate_pass_counts_since_log[gate_idx].item(),
+                    locs["it"],
+                )
+            strategy._gate_pass_counts_since_log.zero_()
+
         if len(locs["rewbuffer"]) > 0:
             self.writer.add_scalar("Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
             self.writer.add_scalar("Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])

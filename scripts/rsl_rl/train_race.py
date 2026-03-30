@@ -10,6 +10,9 @@
 import sys
 import os
 
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, project_root)
+
 local_rsl_path = os.path.abspath("src/third_parties/rsl_rl_local")
 if os.path.exists(local_rsl_path):
     sys.path.insert(0, local_rsl_path)
@@ -105,18 +108,32 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
 
-    # TODO ----- START ----- Define rewards scales
-    # reward scales
-    progress_goal_reward_scale = 50.0
-    crash_reward = -1.0
-    death_cost = -10.0
-
+    # # Reward scales for 8-component reward structure
+    # rewards = {
+    #     'gate_pass_reward_scale': 100.0,      # sparse bonus for passing a gate
+    #     'progress_reward_scale': 10.0,         # dense shaping toward current gate
+    #     'vel_align_reward_scale': 1.2,        # fly toward gate, not hover
+    #     'speed_reward_scale': 0.5,            # encourage fast flight
+    #     'entry_half_plane_reward_scale': 3.0, # small bonus for re-entering the valid approach side
+    #     'crash_reward_scale': -5.0,           # collision penalty
+    #     'action_smooth_reward_scale': -0.05,  # prevent oscillation
+    #     'altitude_reward_scale': -2.0,        # avoid ground
+    #     'lateral_reward_scale': 0,         # stay near gate center without over-penalizing hairpins
+    #     'death_cost': -80.0,                  # termination penalty
+    # }
     rewards = {
-        'progress_goal_reward_scale': progress_goal_reward_scale,
-        'crash_reward_scale': crash_reward,
-        'death_cost': death_cost,
-    }
-    # TODO ----- END -----
+    'gate_pass_reward_scale': 20.0,
+    'progress_reward_scale': 8.0,
+    'vel_align_reward_scale': 1.0,
+    'speed_reward_scale': 0.3,
+    'entry_half_plane_reward_scale': 5.0,
+    'crash_reward_scale': -2.0,
+    'action_smooth_reward_scale': -0.03,
+    'altitude_reward_scale': -1.5,
+    'lateral_reward_scale': 0.0,
+    'time_reward_scale': -0.1,
+    'death_cost': -25.0,
+}
 
     env_cfg.is_train = True
     env_cfg.rewards = rewards
@@ -164,6 +181,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
 
     # run training
+    # runner.learn() 定义在 rsl_rl/runners/on_policy_runner.py 中的 OnPolicyRunner 类
+    # 本地路径: src/third_parties/rsl_rl_local/rsl_rl/runners/on_policy_runner.py
+    # 该方法执行 PPO 训练循环：采集数据 -> 计算优势 -> 更新策略网络
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
 
     # close the simulator
