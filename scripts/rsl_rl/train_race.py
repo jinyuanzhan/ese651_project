@@ -113,16 +113,17 @@ torch.backends.cudnn.benchmark = False
 
 REWARD_PRESETS = {
     "baseline": {
-        "gate_pass_reward_scale": 80.0,
-        "progress_reward_scale": 10.0,
-        "speed_reward_scale": 0,
-        # "entry_half_plane_reward_scale": 3.0,
-        # "crash_reward_scale": -5.0,
-        "action_smooth_reward_scale": 0,
+        "gate_pass_reward_scale": 50.0,     # 过门是核心目标，给强激励
+        "progress_reward_scale": 10,         # 朝门飞的 dense shaping
+        "speed_reward_scale": 0,           # 奖励高速飞行
+        "entry_half_plane_reward_scale": 0.5,  # 一次性奖励回到 gate3 的有效进入半平面（+Y 侧）
+        "crash_reward_scale": -3,
+      "action_smooth_reward_scale": 0,
         # "altitude_reward_scale": -2.0,
         # "lateral_reward_scale": 0.0,
-        "time_reward_scale": -0.01, # time penalty
-        "death_cost": -100.0,
+        "time_reward_scale": -0.1,          # 每步惩罚，让慢飞代价高
+        "powerloop_corridor_reward_scale": 0.5,  # 只惩罚 gate3 的 +X 侧绕行，避免在 corridor 侧刷分
+        "death_cost": -80.0,
     },
     # "trial1": {
     #     "gate_pass_reward_scale": 80.0,

@@ -118,10 +118,12 @@ class DefaultQuadcopterStrategy:
 
         # ---- Gate passage detection via gate-frame x-axis crossing ----
         # Gate frame x-axis = gate normal (opposite to passing direction).
-        # Drone approaches with x > 0, passes through when x crosses to <= 0.
+        # Drone approaches with x > 0, passes through when x crosses to <= threshold.
+        # A small positive threshold (0.1m) counts as passed slightly before the YOZ plane.
+        gate_pass_x_threshold = 0.1 # original 0
         current_x = self.env._pose_drone_wrt_gate[:, 0]
         prev_x = self.env._prev_x_drone_wrt_gate
-        x_crossed = (prev_x > 0) & (current_x <= 0)
+        x_crossed = (prev_x > gate_pass_x_threshold) & (current_x <= gate_pass_x_threshold)
 
         # Check drone is within the gate opening (gate_side=1.0 => ±0.5m)
         yz = self.env._pose_drone_wrt_gate[:, 1:3]
@@ -129,6 +131,11 @@ class DefaultQuadcopterStrategy:
 
         gate_passed = x_crossed & in_bounds
         self.env._prev_x_drone_wrt_gate[:] = current_x.clone()
+         # Only update prev_x when no crossing detected, or when gate was validly passed.
+      # If drone crossed the plane outside the aperture (x_crossed & ~in_bounds),
+      # keep prev_x positive so the crossing detector stays armed.
+      #update_mask = ~x_crossed | gate_passed
+      #self.env._prev_x_drone_wrt_gate[update_mask] = current_x[update_mask]
 
         # Advance waypoint for passed envs
         ids = torch.where(gate_passed)[0]
@@ -161,11 +168,15 @@ class DefaultQuadcopterStrategy:
         # 1. Gate pass (sparse)
         gate_pass = gate_passed.float()
 
+        # Tight same-direction gate pairs (powerloop gate 2 -> 3 in the current track).
+        powerloop_mask = self._half_plane_shape_gate_mask[self.env._idx_wp]
+
         # 2. Global progress: completed gates plus smooth approach to the current gate.
         # Reward the increase in this global progress so hovering near one gate cannot farm reward.
         global_progress = self._compute_global_progress()
         progress = torch.clamp(global_progress - self._prev_global_progress, -1.0, 1.0)
         progress[gate_passed] = 0.0  # avoid double reward with gate_pass on crossing step
+        progress[powerloop_mask] = torch.clamp(progress[powerloop_mask], min=0.0)
         self._prev_global_progress[:] = global_progress
 
         # 3. Speed bonus
@@ -173,26 +184,26 @@ class DefaultQuadcopterStrategy:
         speed = torch.linalg.norm(vel_world, dim=1)
         speed_reward = torch.tanh(speed / 3.0)
 
-        # # 4.5 Entry-side shaping: reward returning to the valid entry half-plane for tight
-        # # same-direction gate pairs (e.g. gate 2 -> gate 3 in powerloop).
-        # current_gate_mask = self._half_plane_shape_gate_mask[self.env._idx_wp]
-        # in_entry_half_plane = self.env._pose_drone_wrt_gate[:, 0] > 0.15
-        # near_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate[:, :2], dim=1) < 2.0
-        # entered_entry_half_plane = (
-        #     current_gate_mask
-        #     & near_gate
-        #     & (~self._entry_half_plane_rewarded)
-        #     & (~self._prev_in_entry_half_plane)
-        #     & in_entry_half_plane
-        # ).float()
-        # self._prev_in_entry_half_plane[:] = in_entry_half_plane
-        # self._entry_half_plane_rewarded |= entered_entry_half_plane.bool()
+        # 4.5 Entry-side shaping: reward returning to the valid entry half-plane for tight
+        # same-direction gate pairs (e.g. gate 2 -> gate 3 in powerloop).
+        in_entry_half_plane = self.env._pose_drone_wrt_gate[:, 0] > 0.15
+        near_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate[:, :2], dim=1) < 2.0
+        entered_entry_half_plane = (
+            powerloop_mask
+            & near_gate
+            & (~self._entry_half_plane_rewarded)
+            & (~self._prev_in_entry_half_plane)
+            & in_entry_half_plane
+        ).float()
+        self._prev_in_entry_half_plane[:] = in_entry_half_plane
+        self._entry_half_plane_rewarded |= entered_entry_half_plane.bool()
 
-        # 5. Crash detection feeds only termination/death_cost, not a dense reward term.
+        # 5. Crash detection: dense penalty per contact + termination after threshold.
         contact_forces = self.env._contact_sensor.data.net_forces_w
         contact_detected = (torch.norm(contact_forces, dim=-1) > 1e-8).squeeze(1)
         mask = self.env.episode_length_buf > 100
         self.env._crashed = self.env._crashed + (contact_detected & mask).int()
+        crash_penalty = (contact_detected & mask).float()
 
         # 6. Action smoothness: penalize large action changes
         action_diff = self.env._actions - self._prev_step_actions
@@ -210,18 +221,29 @@ class DefaultQuadcopterStrategy:
         # 9. Time penalty: constant per-step cost to encourage speed
         time_penalty = torch.ones(self.num_envs, device=self.device)
 
+        # 10. Powerloop corridor: penalize overshooting to gate 3's +X side
+        # (gate-frame y < 0). The desired corridor side stays neutral so the
+        # policy cannot farm reward by hovering on the "good" side.
+        gate_y = self.env._pose_drone_wrt_gate[:, 1]
+        detour_extent = torch.clamp(-gate_y - 0.05, min=0.0)
+        powerloop_corridor = -torch.tanh(detour_extent / 0.5) * powerloop_mask.float()
+
         if self.cfg.is_train:
             rew = self.env.rew
             rewards = {
                 "gate_pass":     gate_pass * rew['gate_pass_reward_scale'],
                 "progress":      progress * rew['progress_reward_scale'],
                 "speed":         speed_reward * rew['speed_reward_scale'],
-                # "entry_half_plane": entered_entry_half_plane * rew['entry_half_plane_reward_scale'],
+                "crash":         crash_penalty * rew['crash_reward_scale'],
                 "action_smooth": action_smooth * rew['action_smooth_reward_scale'],
                 # "altitude":      altitude_penalty * rew['altitude_reward_scale'],
                 # "lateral":       lateral_penalty * rew['lateral_reward_scale'],
                 "time":          time_penalty * rew['time_reward_scale'],
             }
+            if 'entry_half_plane_reward_scale' in rew:
+                rewards["entry_half_plane"] = entered_entry_half_plane * rew['entry_half_plane_reward_scale']
+            if 'powerloop_corridor_reward_scale' in rew:
+                rewards["powerloop_corridor"] = powerloop_corridor * rew['powerloop_corridor_reward_scale']
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             reward = torch.where(self.env.reset_terminated,
                                  torch.ones_like(reward) * rew['death_cost'], reward)
@@ -255,12 +277,12 @@ class DefaultQuadcopterStrategy:
         return corners_body.reshape(N, 12)
 
     def get_observations(self) -> Dict[str, torch.Tensor]:
-        """Get 36-dim observations: O_ego (12D) + O_env (24D).
+        """Get observations: O_ego (12 or 15D) + O_env (24D).
 
-        O_ego (12D):
+        O_ego (12D or 15D):
             lin_vel_b           (3)  - linear velocity in body frame
+            ang_vel_b           (3)  - angular velocity in body frame (if use_ang_vel_obs)
             rotation_matrix_wb  (9)  - drone rotation matrix (body-to-world), flattened
-            # prev_actions      (4)  - previous policy actions (disabled)
 
         O_env (24D):
             current_gate_corners_body (12) - current gate 4 corners in body frame
@@ -276,59 +298,40 @@ class DefaultQuadcopterStrategy:
         lin_vel_b = self.env._robot.data.root_com_lin_vel_b         # (N, 3)
 
         # --- O_ego ---
-        # 1. Linear velocity in body frame (3D)
-        # 2. Flattened R_wb (9D): body-frame basis expressed in world frame.
         rot_matrix_wb = matrix_from_quat(drone_quat_w).reshape(N, 9)  # (N, 9)
-        # # 3. Previous actions (4D) - disabled
-        # prev_actions = self.env._actions                           # (N, 4)
+
+        ego_parts = [lin_vel_b]                                       # 3
+        if self.cfg.use_ang_vel_obs:
+            ang_vel_b = self.env._robot.data.root_ang_vel_b           # (N, 3)
+            ego_parts.append(ang_vel_b)                               # +3 = 6
+        ego_parts.append(rot_matrix_wb)                               # +9 = 15 or 12
 
         # --- O_env ---
         idx_wp = self.env._idx_wp                                    # (N,)
         next_idx = (idx_wp + 1) % n_gates                            # (N,)
 
-        # 4. Current gate 4 corners in body frame (12D)
         current_gate_corners_body = self._gate_corners_to_body(
             idx_wp, drone_pos_w, drone_quat_w)                       # (N, 12)
-        # 5. Next gate 4 corners in body frame (12D)
         next_gate_corners_body = self._gate_corners_to_body(
             next_idx, drone_pos_w, drone_quat_w)                     # (N, 12)
 
         obs = torch.cat(
-            [
-                lin_vel_b,                  # 3
-                rot_matrix_wb,              # 9  = O_ego 12
-                # prev_actions,             # 4  (disabled)
-                current_gate_corners_body,  # 12
-                next_gate_corners_body,     # 12 = O_env 24  -> total 36
-            ],
+            ego_parts + [current_gate_corners_body, next_gate_corners_body],
             dim=-1,
-        )
+        )  # total 39 (with ang_vel) or 36 (without)
         observations = {"policy": obs}
 
         # --- Privileged critic observations (optional, training only) ---
-        # Appends extra state to the policy obs so the critic sees 36 + G+9 D.
-        # Privileged info (G=num_gates, e.g. 7 for powerloop -> 16D):
-        #   ang_vel_b              (3)       - angular velocity in body frame
-        #   drone_pos_w            (3)       - world position
-        #   pose_drone_wrt_gate    (3)       - drone position in current gate frame
-        #   gate_index_onehot      (n_gates) - one-hot current target gate index
+        # Privileged info (not available to actor):
+        #   ang_vel_b (3) - only if not already in actor obs
+        #   drone_pos_w (3) - world position
         if self.cfg.use_privileged_critic:
-            ang_vel_b = self.env._robot.data.root_ang_vel_b             # (N, 3)
-            pose_gate = self.env._pose_drone_wrt_gate                   # (N, 3)
-            gate_onehot = torch.nn.functional.one_hot(
-                idx_wp.long(), num_classes=n_gates
-            ).float()                                                   # (N, n_gates)
-
-            critic_obs = torch.cat(
-                [
-                    obs,            # 36       (actor obs as base)
-                    ang_vel_b,      # 3
-                    drone_pos_w,    # 3
-                    pose_gate,      # 3
-                    gate_onehot,    # n_gates  -> critic total 36+9+n_gates
-                ],
-                dim=-1,
-            )
+            priv_parts = [obs]
+            if not self.cfg.use_ang_vel_obs:
+                ang_vel_b = self.env._robot.data.root_ang_vel_b       # (N, 3)
+                priv_parts.append(ang_vel_b)
+            priv_parts.append(drone_pos_w)
+            critic_obs = torch.cat(priv_parts, dim=-1)
             observations["critic"] = critic_obs
 
         return observations
@@ -403,12 +406,33 @@ class DefaultQuadcopterStrategy:
 
         default_root_state = self.env._robot.data.default_root_state[env_ids].clone()
 
+        is_powerloop_apex = None  # set in training curriculum branch
+
         if self.cfg.is_train:
             n_gates = self.env._waypoints.shape[0]
             if getattr(self.env.cfg, "use_curriculum_reset", True):
                 iteration = self.env.iteration
                 total_iterations = max(1, getattr(self.env, "total_training_iterations", 1))
                 progress_ratio = iteration / max(1, total_iterations - 1)
+
+                # Bias more of the powerloop practice toward the loop trajectory itself
+                # and less toward static gate-3 starts.
+                _P_APEX_MAX = 0.40
+                _APEX_START = 0.10
+                _APEX_FULL = 0.25
+                if progress_ratio < _APEX_START:
+                    p_apex = 0.0
+                elif progress_ratio < _APEX_FULL:
+                    p_apex = _P_APEX_MAX * (progress_ratio - _APEX_START) / (_APEX_FULL - _APEX_START)
+                else:
+                    p_apex = _P_APEX_MAX
+
+                # Pitch upper bound staged: expand after policy stabilizes
+                _PITCH_EXPAND = 0.25
+                if progress_ratio < _PITCH_EXPAND:
+                    apex_pitch_max = np.pi * 2 / 3   # Phase 1: up to 120°
+                else:
+                    apex_pitch_max = np.pi             # Phase 2: up to 180°
 
                 # Curriculum: gradually introduce harder gates with smoother transitions.
                 # Powerloop (gate 2/3) and chicane (gate 5/6) get extra weight.
@@ -420,17 +444,17 @@ class DefaultQuadcopterStrategy:
                     gate_weights = torch.tensor([1.0, 2.0], device=self.device)[:max_gate]
                 elif progress_ratio < 0.25:
                     max_gate, p_start = min(4, n_gates), 0.45
-                    gate_weights = torch.tensor([1.0, 1.5, 4.0, 3.0], device=self.device)[:max_gate]
+                    gate_weights = torch.tensor([1.0, 3.0, 4.0, 2.0], device=self.device)[:max_gate]
                 elif progress_ratio < 0.50:
                     max_gate, p_start = min(6, n_gates), 0.40
-                    gate_weights = torch.tensor([1.0, 1.0, 3.0, 2.0, 1.5, 1.5], device=self.device)[:max_gate]
+                    gate_weights = torch.tensor([1.0, 2.0, 3.0, 1.0, 1.5, 1.5], device=self.device)[:max_gate]
                 else:
                     max_gate, p_start = n_gates, 0.35
                     gate_weights = torch.ones(max_gate, device=self.device)
                     if max_gate > 2:
                         gate_weights[2] += 2.0   # powerloop entry
                     if max_gate > 3:
-                        gate_weights[3] += 1.5   # powerloop exit
+                        gate_weights[3] += 0.5   # powerloop exit; apex now carries more of this phase
                     if max_gate > 5:
                         gate_weights[5] += 1.0   # chicane entry
                     if max_gate > 6:
@@ -440,6 +464,13 @@ class DefaultQuadcopterStrategy:
                 random_gates = torch.multinomial(gate_weights, n_reset, replacement=True).to(self.env._idx_wp.dtype)
                 use_start = torch.rand(n_reset, device=self.device) < p_start
                 waypoint_indices = torch.where(use_start, torch.zeros_like(random_gates), random_gates)
+
+                # Select environments for powerloop apex reset (powerloop track only)
+                if self.env.cfg.track_name == 'powerloop' and p_apex > 0:
+                    is_powerloop_apex = torch.rand(n_reset, device=self.device) < p_apex
+                    n_apex = is_powerloop_apex.sum().item()
+                    if n_apex > 0:
+                        waypoint_indices[is_powerloop_apex] = 3  # target gate 3
             else:
                 waypoint_indices = torch.zeros(
                     n_reset, device=self.device, dtype=self.env._idx_wp.dtype
@@ -480,6 +511,53 @@ class DefaultQuadcopterStrategy:
             speed0 = (1.5 + torch.rand(n_reset, device=self.device) * 2.5) * (waypoint_indices > 0).float()
             default_root_state[:, 7:10] = gate_dirs * speed0.unsqueeze(1)
             default_root_state[:, 10:13] = 0.0
+
+            # Override state for powerloop trajectory resets.
+            # Sample along the full loop arc (phase 0 = gate 2 exit, phase 1 = apex)
+            # so the policy sees a continuous bridge of states, not just the apex.
+            # Gates 2-3 are offset 1.25m in X, so the loop requires banking (roll).
+            if is_powerloop_apex is not None and is_powerloop_apex.any():
+                n_apex = is_powerloop_apex.sum().item()
+                apex_mask = is_powerloop_apex
+
+                # Phase along the loop: 0 = near gate 2 exit, 1 = full apex
+                phase = torch.rand(n_apex, device=self.device)
+
+                # Pitch: 0 → apex_pitch_max, proportional to phase + noise
+                pitch_noise = torch.empty(n_apex, device=self.device).uniform_(-0.15, 0.15)
+                apex_pitch = (phase * apex_pitch_max + pitch_noise).clamp(0, apex_pitch_max)
+                # Z: scales with pitch — shifted slightly lower to keep the apex closer to gate height
+                apex_z = 0.8 + (phase * 1.5)  # [0.8, 2.3]
+                apex_z += torch.empty(n_apex, device=self.device).uniform_(-0.15, 0.15)  # noise
+                apex_z.clamp_(0.5, 2.8)
+
+                # X: follow natural trajectory from gate 2 (x=-0.625) toward gate 3 (x=+0.625)
+                x_center = -0.625 + phase * 1.25
+                x_noise = torch.empty(n_apex, device=self.device).uniform_(-0.3, 0.3)
+                apex_x = (x_center + x_noise).clamp(-1.0, 1.0)
+                # Y: near the gate plane
+                apex_y = 0.05 + torch.empty(n_apex, device=self.device).uniform_(-0.1, 0.1)
+
+                default_root_state[apex_mask, 0] = apex_x
+                default_root_state[apex_mask, 1] = apex_y
+                default_root_state[apex_mask, 2] = apex_z
+
+                # Orientation: pitch AND roll both phase-dependent.
+                # Roll: larger at mid-loop where banking is needed for the 1.25m X shift.
+                roll_max = 0.3 + phase * 0.5  # [0.3, 0.8] rad ≈ [17°, 46°]
+                apex_roll = (torch.rand(n_apex, device=self.device) * 2 - 1) * roll_max
+                apex_yaw  = torch.empty(n_apex, device=self.device).uniform_(-np.pi / 2 - 0.3, -np.pi / 2 + 0.3)
+                default_root_state[apex_mask, 3:7] = quat_from_euler_xyz(apex_roll, apex_pitch, apex_yaw)
+
+                # Velocity: speed decreases with phase, direction rotates with the loop
+                speed_noise = torch.empty(n_apex, device=self.device).uniform_(-0.3, 0.3)
+                loop_speed = (2.0 * (1.0 - phase * 0.7) + speed_noise).clamp(0.3, 3.0)
+                vel_noise = torch.randn(n_apex, 3, device=self.device) * 0.2
+                # vx: wider range to match larger roll/banking
+                default_root_state[apex_mask, 7]  = torch.empty(n_apex, device=self.device).uniform_(-0.8, 0.8) + vel_noise[:, 0]
+                default_root_state[apex_mask, 8]  = -loop_speed * torch.cos(apex_pitch) + vel_noise[:, 1]  # vy: -Y early → +Y late
+                default_root_state[apex_mask, 9]  =  loop_speed * torch.sin(apex_pitch) + vel_noise[:, 2]  # vz: 0 early → up mid
+                default_root_state[apex_mask, 10:13] = 0.0
         else:
             waypoint_indices = torch.full(
                 (n_reset,), int(self.env._initial_wp), device=self.device, dtype=self.env._idx_wp.dtype
@@ -537,7 +615,13 @@ class DefaultQuadcopterStrategy:
             default_root_state[:, :3]
         )
 
-        self.env._prev_x_drone_wrt_gate[env_ids] = 1.0
+        if is_powerloop_apex is not None and is_powerloop_apex.any():
+            actual_x = self.env._pose_drone_wrt_gate[env_ids, 0].clone()
+            self.env._prev_x_drone_wrt_gate[env_ids] = torch.where(
+                is_powerloop_apex, actual_x, torch.ones_like(actual_x)
+            )
+        else:
+            self.env._prev_x_drone_wrt_gate[env_ids] = 1.0
 
         self.env._crashed[env_ids] = 0
         self.env._out_of_bounds[env_ids] = False

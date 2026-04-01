@@ -35,6 +35,7 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--follow_robot", type=int, default=-1, help="Follow robot index.")
 parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+parser.add_argument("--no_ang_vel_obs", action="store_true", default=False, help="Disable ang_vel in obs (for old 36D checkpoints).")
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -102,6 +103,7 @@ def main():
     env_cfg.is_train = False
     env_cfg.max_motor_noise_std = 0.0
     env_cfg.seed = args_cli.seed
+    env_cfg.use_ang_vel_obs = not args_cli.no_ang_vel_obs
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -142,6 +144,18 @@ def main():
         ppo_runner.alg.actor_critic, normalizer=ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
     )
 
+    # -- Lap timing setup --
+    quad_env = env.unwrapped
+    num_gates = quad_env._waypoints.shape[0]
+    step_dt = quad_env.cfg.sim.dt * quad_env.cfg.decimation
+    max_laps = quad_env.cfg.max_n_laps
+
+    lap_start_step = None
+    last_lap_end_step = None
+    lap_times = []
+    all_lap_times = []
+    prev_gates_passed = 0
+
     # reset environment
     obs = env.get_observations()
     # Extract tensor from TensorDict for policy
@@ -159,11 +173,64 @@ def main():
             # Extract tensor from TensorDict for policy
             if hasattr(obs, "get"):  # Check if it's a TensorDict
                 obs = obs["policy"]  # Extract the policy observation
+        timestep += 1
+
+        # -- Lap timing (env 0) --
+        gates_passed = quad_env._n_gates_passed[0].item()
+
+        if gates_passed < prev_gates_passed:
+            # Auto-reset detected. The final lap may have been completed in the same
+            # env.step() that triggered the reset, so _n_gates_passed is already zeroed.
+            # Recover the missing lap if prev_gates_passed indicates completion.
+            if lap_start_step is not None and len(lap_times) < max_laps:
+                expected_laps = (prev_gates_passed - 1) // num_gates
+                while len(lap_times) < expected_laps and len(lap_times) < max_laps:
+                    lap_time = (timestep - last_lap_end_step) * step_dt
+                    total_time = (timestep - lap_start_step) * step_dt
+                    lap_times.append(lap_time)
+                    last_lap_end_step = timestep
+                    print(f"[LAP TIMER] Lap {len(lap_times)}/{max_laps}: {lap_time:.3f}s  (total: {total_time:.3f}s)")
+            all_lap_times.extend(lap_times)
+            lap_start_step = None
+            last_lap_end_step = None
+            lap_times = []
+
+        if gates_passed > prev_gates_passed:
+            if lap_start_step is None:
+                lap_start_step = timestep
+                last_lap_end_step = timestep
+                print(f"[LAP TIMER] Timing started (passed gate 0, {num_gates} gates/lap)")
+
+            completed_laps = (gates_passed - 1) // num_gates
+            while len(lap_times) < completed_laps and len(lap_times) < max_laps:
+                lap_time = (timestep - last_lap_end_step) * step_dt
+                total_time = (timestep - lap_start_step) * step_dt
+                lap_times.append(lap_time)
+                last_lap_end_step = timestep
+                print(f"[LAP TIMER] Lap {len(lap_times)}/{max_laps}: {lap_time:.3f}s  (total: {total_time:.3f}s)")
+
+        prev_gates_passed = gates_passed
+
         if args_cli.video:
-            timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
+
+    # -- Print lap summary --
+    all_lap_times.extend(lap_times)
+    if len(all_lap_times) > 0:
+        total = sum(all_lap_times)
+        print(f"\n{'='*50}")
+        print(f"  RACE RESULTS  ({num_gates} gates/lap)")
+        print(f"{'='*50}")
+        for i, lt in enumerate(all_lap_times):
+            print(f"  Lap {i+1}: {lt:.3f}s")
+        print(f"  {'-'*30}")
+        print(f"  Total ({len(all_lap_times)} laps): {total:.3f}s")
+        print(f"  Average lap:  {total / len(all_lap_times):.3f}s")
+        print(f"{'='*50}\n")
+    else:
+        print("\n[LAP TIMER] No laps completed.\n")
 
     # close the simulator
     env.close()

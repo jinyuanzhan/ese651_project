@@ -194,7 +194,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     min_altitude = 0.1
     max_altitude = 3.0
     max_time_on_ground = 1.5
-    out_of_bounds_margin_xy = 6.0
+    out_of_bounds_margin_xy = 3.0
 
     # motor dynamics
     arm_length = 0.043
@@ -222,6 +222,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     is_train = None
     use_curriculum_reset = True
     use_privileged_critic = False
+    use_ang_vel_obs = True
 
     k_aero_xy = 9.1785e-7
     k_aero_z = 10.311e-7
@@ -690,11 +691,12 @@ class QuadcopterEnv(DirectRLEnv):
         cond_crashed = self._crashed > 10
 
         #TODO ----- START ----- [OPTIONAL]
-        # Consider adding additional _get_dones() conditions to influence training. Note that the additional conditions
-        # will not be used during runtime for the official class race.
-        # Temporary debugging rollback: keep the boundary bookkeeping/logging path,
-        # but do not terminate training episodes due to x/y out-of-bounds.
-        cond_out_of_bounds_xy = torch.zeros_like(cond_max_h)
+        # Terminate if drone flies outside the track bounding box + margin.
+        drone_xy = self._robot.data.root_link_pos_w[:, :2]
+        cond_out_of_bounds_xy = (
+            (drone_xy < self._bounds_min_xy).any(dim=1)
+            | (drone_xy > self._bounds_max_xy).any(dim=1)
+        )
         #TODO ----- END ----- [OPTIONAL]
         self._out_of_bounds[:] = cond_out_of_bounds_xy
 
