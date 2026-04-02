@@ -120,7 +120,7 @@ class DefaultQuadcopterStrategy:
         # Gate frame x-axis = gate normal (opposite to passing direction).
         # Drone approaches with x > 0, passes through when x crosses to <= threshold.
         # A small positive threshold (0.1m) counts as passed slightly before the YOZ plane.
-        gate_pass_x_threshold = 0.1 # original 0
+        gate_pass_x_threshold = 0
         current_x = self.env._pose_drone_wrt_gate[:, 0]
         prev_x = self.env._prev_x_drone_wrt_gate
         x_crossed = (prev_x > gate_pass_x_threshold) & (current_x <= gate_pass_x_threshold)
@@ -131,11 +131,6 @@ class DefaultQuadcopterStrategy:
 
         gate_passed = x_crossed & in_bounds
         self.env._prev_x_drone_wrt_gate[:] = current_x.clone()
-         # Only update prev_x when no crossing detected, or when gate was validly passed.
-      # If drone crossed the plane outside the aperture (x_crossed & ~in_bounds),
-      # keep prev_x positive so the crossing detector stays armed.
-      #update_mask = ~x_crossed | gate_passed
-      #self.env._prev_x_drone_wrt_gate[update_mask] = current_x[update_mask]
 
         # Advance waypoint for passed envs
         ids = torch.where(gate_passed)[0]
@@ -153,13 +148,15 @@ class DefaultQuadcopterStrategy:
             self.env._n_gates_passed[ids] += 1
             self.env._idx_wp[ids] = (self.env._idx_wp[ids] + 1) % n_gates
             self.env._desired_pos_w[ids, :3] = self.env._waypoints[self.env._idx_wp[ids], :3]
-            self.env._prev_x_drone_wrt_gate[ids] = 1.0  # reset for next gate
+            # self.env._prev_x_drone_wrt_gate[ids] = 1.0  # BUG: forced 1.0 causes false gate-pass for tight same-direction pairs (gate2->3)
             # Recompute gate-frame pose for the new gate so rewards & obs are consistent
             self.env._pose_drone_wrt_gate[ids], _ = subtract_frame_transforms(
                 self.env._waypoints[self.env._idx_wp[ids], :3],
                 self.env._waypoints_quat[self.env._idx_wp[ids], :],
                 self.env._robot.data.root_link_pos_w[ids, :3]
             )
+            # FIX: use actual gate-frame x so drone must truly return to entry side before next pass triggers
+            self.env._prev_x_drone_wrt_gate[ids] = self.env._pose_drone_wrt_gate[ids, 0].clone()
             self._prev_in_entry_half_plane[ids] = self.env._pose_drone_wrt_gate[ids, 0] > 0.15
             self._entry_half_plane_rewarded[ids] = self._prev_in_entry_half_plane[ids]
 
@@ -222,11 +219,17 @@ class DefaultQuadcopterStrategy:
         time_penalty = torch.ones(self.num_envs, device=self.device)
 
         # 10. Powerloop corridor: penalize overshooting to gate 3's +X side
-        # (gate-frame y < 0). The desired corridor side stays neutral so the
-        # policy cannot farm reward by hovering on the "good" side.
+        # (gate-frame y < 0). Corridor side gets 0 (no farming).
         gate_y = self.env._pose_drone_wrt_gate[:, 1]
         detour_extent = torch.clamp(-gate_y - 0.05, min=0.0)
         powerloop_corridor = -torch.tanh(detour_extent / 0.5) * powerloop_mask.float()
+
+        # 11. Powerloop altitude: reward gaining altitude above gate height (0.75m)
+        # during the gate 2→3 segment. Encourages the "go up" phase of the loop.
+        altitude_above_gate = torch.clamp(
+            self.env._robot.data.root_link_pos_w[:, 2] - 0.75, min=0.0
+        )
+        powerloop_altitude = torch.tanh(altitude_above_gate / 1.5) * powerloop_mask.float()
 
         if self.cfg.is_train:
             rew = self.env.rew
@@ -244,6 +247,8 @@ class DefaultQuadcopterStrategy:
                 rewards["entry_half_plane"] = entered_entry_half_plane * rew['entry_half_plane_reward_scale']
             if 'powerloop_corridor_reward_scale' in rew:
                 rewards["powerloop_corridor"] = powerloop_corridor * rew['powerloop_corridor_reward_scale']
+            if 'powerloop_altitude_reward_scale' in rew:
+                rewards["powerloop_altitude"] = powerloop_altitude * rew['powerloop_altitude_reward_scale']
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             reward = torch.where(self.env.reset_terminated,
                                  torch.ones_like(reward) * rew['death_cost'], reward)
@@ -417,7 +422,7 @@ class DefaultQuadcopterStrategy:
 
                 # Bias more of the powerloop practice toward the loop trajectory itself
                 # and less toward static gate-3 starts.
-                _P_APEX_MAX = 0.40
+                _P_APEX_MAX = 0.30
                 _APEX_START = 0.10
                 _APEX_FULL = 0.25
                 if progress_ratio < _APEX_START:
