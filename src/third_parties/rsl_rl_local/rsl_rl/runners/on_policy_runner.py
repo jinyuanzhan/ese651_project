@@ -93,6 +93,12 @@ class OnPolicyRunner:
         self.tot_time = 0
         self.current_learning_iteration = 0
         self.git_status_repos = [rsl_rl.__file__]
+        self.latest_episode_metrics: dict[str, float] = {}
+        self.latest_episode_metrics_iteration: int | None = None
+        self.best_episode_metrics: dict[str, float] = {}
+        self.best_episode_metrics_iteration: int | None = None
+        self.best_episode_metric_name = "Episode_Progress/gates_passed"
+        self.best_episode_metric_value: float | None = None
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
         # initialize writer
@@ -266,6 +272,7 @@ class OnPolicyRunner:
 
         # -- Episode info
         ep_string = ""
+        episode_metric_values: dict[str, float] = {}
         if locs["ep_infos"]:
             for key in locs["ep_infos"][0]:
                 infotensor = torch.tensor([], device=self.device)
@@ -279,13 +286,25 @@ class OnPolicyRunner:
                         ep_info[key] = ep_info[key].unsqueeze(0)
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 value = torch.mean(infotensor)
+                scalar_value = float(value.item())
+                episode_metric_values[key] = scalar_value
                 # log to logger and terminal
                 if "/" in key:
                     self.writer.add_scalar(key, value, locs["it"])
-                    ep_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
+                    ep_string += f"""{f'{key}:':>{pad}} {scalar_value:.4f}\n"""
                 else:
                     self.writer.add_scalar("Episode/" + key, value, locs["it"])
-                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {scalar_value:.4f}\n"""
+        if episode_metric_values:
+            self.latest_episode_metrics = dict(episode_metric_values)
+            self.latest_episode_metrics_iteration = locs["it"]
+            best_candidate = episode_metric_values.get(self.best_episode_metric_name)
+            if best_candidate is not None and (
+                self.best_episode_metric_value is None or best_candidate > self.best_episode_metric_value
+            ):
+                self.best_episode_metric_value = best_candidate
+                self.best_episode_metrics = dict(episode_metric_values)
+                self.best_episode_metrics_iteration = locs["it"]
         mean_std = self.alg.actor_critic.action_std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs["collection_time"] + locs["learn_time"]))
 
@@ -455,3 +474,13 @@ class OnPolicyRunner:
 
     def add_git_repo_to_log(self, repo_file_path):
         self.git_status_repos.append(repo_file_path)
+
+    def get_episode_metric_summary(self):
+        return {
+            "best_metric_name": self.best_episode_metric_name,
+            "best_metric_value": self.best_episode_metric_value,
+            "best_iteration": self.best_episode_metrics_iteration,
+            "best": dict(self.best_episode_metrics),
+            "latest_iteration": self.latest_episode_metrics_iteration,
+            "latest": dict(self.latest_episode_metrics),
+        }

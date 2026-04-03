@@ -280,7 +280,6 @@ def main():
         "crash_reward_scale": -3.0,
         "action_smooth_reward_scale": 0.0,
         "time_reward_scale": -0.01,
-        "powerloop_corridor_reward_scale": 0.0,
         "death_cost": -80.0,
     }
 

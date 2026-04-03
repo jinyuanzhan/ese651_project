@@ -222,7 +222,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     is_train = None
     use_curriculum_reset = True
     use_privileged_critic = False
-    use_ang_vel_obs = True
+    use_ang_vel_obs = False
 
     k_aero_xy = 9.1785e-7
     k_aero_z = 10.311e-7
@@ -700,11 +700,22 @@ class QuadcopterEnv(DirectRLEnv):
         #TODO ----- END ----- [OPTIONAL]
         self._out_of_bounds[:] = cond_out_of_bounds_xy
 
+        # Wrong-direction gate crossing: drone passes through gate from exit side to entry side
+        # (x crosses from <= 0 to > 0 while within the gate opening)
+        yz_gate = self._pose_drone_wrt_gate[:, 1:3]
+        in_gate_bounds = (yz_gate.abs() < 0.5).all(dim=1)
+        cond_wrong_direction = (
+            (self._prev_x_drone_wrt_gate <= 0)
+            & (self._pose_drone_wrt_gate[:, 0] > 0)
+            & in_gate_bounds
+        )
+
         died = (
             cond_max_h
           | cond_h_min_time
           | cond_crashed
           | cond_out_of_bounds_xy
+          | cond_wrong_direction
         )
 
         # timeout conditions

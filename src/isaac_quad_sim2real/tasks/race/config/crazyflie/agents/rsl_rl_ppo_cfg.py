@@ -19,8 +19,8 @@ class QuadcopterPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     wandb_project = "ese651_quadcopter"
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
-        actor_hidden_dims=[128, 128],
-        critic_hidden_dims=[512, 256, 128, 128],
+        actor_hidden_dims=[256, 256, 128],
+        critic_hidden_dims=[512, 256, 256, 128],
         activation="elu",
         min_std=0,
     )

@@ -13,8 +13,6 @@
 #   crash           = 0
 #   action_smooth   = 0
 #   time            = -0.1
-#   powerloop_corridor = 0
-#   powerloop_altitude = 0
 #   death_cost      = -80
 
 set -uo pipefail
@@ -24,26 +22,24 @@ cd "$(dirname "$0")/../.."
 SUMMARY_CSV="logs/rsl_rl/train_reward_trials_gate_metrics.csv"
 
 # === Sweep axes ===
-gate_pass_values=(50 70)
-curriculum_values=(OFF ON)
+gate_pass_values=(50 60)
+curriculum_values=(ON OFF)
 
 # === Fixed reward parameters ===
 PR=15
-TR=-0.1
+TR=-0.08
 EHP=0
-PL=0
 
 COMMON_ARGS=(
   --task Isaac-Quadcopter-Race-v0
   --num_envs 4096
-  --max_iterations 1200
+  --max_iterations 800
   --headless
   --seed 42
   --gate_metrics_summary_csv "$SUMMARY_CSV"
   --progress_reward "$PR"
   --time_reward "$TR"
   --entry_half_plane_reward "$EHP"
-  --powerloop_corridor_reward "$PL"
 )
 
 total=$(( ${#gate_pass_values[@]} * ${#curriculum_values[@]} ))
@@ -55,7 +51,7 @@ echo "=========================================="
 echo "  Reward Tuning v3 — gate_pass x curriculum"
 echo "  gate_pass:   ${gate_pass_values[*]}"
 echo "  curriculum:  ${curriculum_values[*]}"
-echo "  Fixed: pr=$PR  time=$TR  ehp=$EHP  pl=$PL"
+echo "  Fixed: pr=$PR  time=$TR  ehp=$EHP"
 echo "  Total experiments: $total"
 echo "  Gate metrics CSV: $SUMMARY_CSV"
 echo "=========================================="

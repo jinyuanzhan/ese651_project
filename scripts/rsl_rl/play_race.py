@@ -26,6 +26,7 @@ from isaaclab.app import AppLauncher
 # local imports
 import cli_args  # isort: skip
 
+
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
@@ -35,7 +36,8 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--follow_robot", type=int, default=-1, help="Follow robot index.")
 parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
-parser.add_argument("--no_ang_vel_obs", action="store_true", default=False, help="Disable ang_vel in obs (for old 36D checkpoints).")
+parser.add_argument("--analyze_activations", action="store_true", default=False,
+                    help="Analyze activation statistics of hidden layers during inference.")
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -53,8 +55,11 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import copy
+
 import gymnasium as gym
 import torch
+import torch.nn as nn
 
 from rsl_rl.runners import OnPolicyRunner
 
@@ -73,6 +78,91 @@ from isaaclab_rl.rsl_rl import (
 # Import extensions to set up environment tasks
 import src.isaac_quad_sim2real.tasks   # noqa: F401
 
+# ---------------------------------------------------------------------------
+#  Activation analysis helper
+# ---------------------------------------------------------------------------
+_HIDDEN_ACT_TYPES = (nn.ELU, nn.ReLU, nn.LeakyReLU, nn.SELU, nn.CELU)
+
+
+class ActivationAnalyzer:
+    """Collects per-neuron activation statistics with O(neurons) memory."""
+
+    def __init__(self, actor: nn.Sequential):
+        self.layer_names: list[str] = []
+        self._count: dict[str, int] = {}
+        self._sum: dict[str, torch.Tensor] = {}
+        self._sum_sq: dict[str, torch.Tensor] = {}
+        self._pos_count: dict[str, torch.Tensor] = {}
+        self._hooks: list[torch.utils.hooks.RemovableHook] = []
+
+        for idx in range(len(actor)):
+            layer = actor[idx]
+            if isinstance(layer, _HIDDEN_ACT_TYPES):
+                # The ActorCritic code reuses the same activation instance for
+                # every hidden layer.  Replace each position with its own copy
+                # so that a per-position forward hook works correctly.
+                new_layer = copy.deepcopy(layer)
+                actor[idx] = new_layer
+                name = f"hidden_{idx // 2}_{type(new_layer).__name__}"
+                self.layer_names.append(name)
+                self._count[name] = 0
+                h = new_layer.register_forward_hook(self._make_hook(name))
+                self._hooks.append(h)
+
+    # -- hook factory -------------------------------------------------------
+    def _make_hook(self, name: str):
+        def hook(_module, _input, output):
+            with torch.no_grad():
+                flat = output.detach().cpu()          # (batch, neurons)
+                n = flat.shape[0]
+                self._count[name] += n
+                if name not in self._sum:
+                    dim = flat.shape[-1]
+                    self._sum[name] = torch.zeros(dim)
+                    self._sum_sq[name] = torch.zeros(dim)
+                    self._pos_count[name] = torch.zeros(dim)
+                self._sum[name] += flat.sum(dim=0)
+                self._sum_sq[name] += (flat ** 2).sum(dim=0)
+                self._pos_count[name] += (flat > 0).float().sum(dim=0)
+        return hook
+
+    # -- report -------------------------------------------------------------
+    def report(self):
+        print(f"\n{'=' * 60}")
+        print("  ACTIVATION ANALYSIS  (Actor Hidden Layers)")
+        print(f"{'=' * 60}")
+
+        for name in self.layer_names:
+            n = self._count[name]
+            if n == 0:
+                continue
+            mean = self._sum[name] / n
+            std = (self._sum_sq[name] / n - mean ** 2).clamp(min=0).sqrt()
+            active_rate = self._pos_count[name] / n        # per-neuron
+
+            n_neurons = mean.shape[0]
+            high = int((active_rate > 0.8).sum())
+            moderate = int(((active_rate >= 0.2) & (active_rate <= 0.8)).sum())
+            low = int((active_rate < 0.2).sum())
+            dead = int((active_rate < 0.01).sum())
+
+            print(f"\n  {name}  ({n_neurons} neurons, {n} samples)")
+            print(f"    Overall mean: {mean.mean():.4f}   std: {std.mean():.4f}")
+            print(f"    Activation rate  (fraction of samples where output > 0, per neuron):")
+            print(f"      High   (>80%):   {high:4d}/{n_neurons}  ({100 * high / n_neurons:.1f}%)")
+            print(f"      Medium (20-80%): {moderate:4d}/{n_neurons}  ({100 * moderate / n_neurons:.1f}%)")
+            print(f"      Low    (<20%):   {low:4d}/{n_neurons}  ({100 * low / n_neurons:.1f}%)")
+            print(f"      Dead   (<1%):    {dead:4d}/{n_neurons}  ({100 * dead / n_neurons:.1f}%)")
+            print(f"    Active-rate range: [{active_rate.min():.4f}, {active_rate.max():.4f}]")
+            print(f"    Neuron-mean range: [{mean.min():.4f}, {mean.max():.4f}]")
+
+        print(f"\n{'=' * 60}\n")
+
+    def cleanup(self):
+        for h in self._hooks:
+            h.remove()
+
+
 def main():
     """Play with RSL-RL agent."""
     # parse configuratio
@@ -89,6 +179,7 @@ def main():
     log_dir = os.path.dirname(resume_path)
 
     if args_cli.follow_robot == -1:
+        # Default overview matches the fixed oblique gate-field screenshot used for review.
         env_cfg.viewer.resolution = (1920, 1080)
         env_cfg.viewer.eye = (10.7, 0.4, 7.2)
         env_cfg.viewer.lookat = (-2.7, 0.5, -0.3)
@@ -103,7 +194,7 @@ def main():
     env_cfg.is_train = False
     env_cfg.max_motor_noise_std = 0.0
     env_cfg.seed = args_cli.seed
-    env_cfg.use_ang_vel_obs = not args_cli.no_ang_vel_obs
+    env_cfg.use_ang_vel_obs = False
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -135,7 +226,8 @@ def main():
     # obtain the trained policy for inference
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
 
-    # export policy to onnx/jit
+    # export policy to onnx/jit (must happen before activation hooks are registered,
+    # because torch.jit.script cannot handle Python forward hooks)
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
     export_policy_as_jit(
         ppo_runner.alg.actor_critic, ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.pt"
@@ -143,6 +235,12 @@ def main():
     export_policy_as_onnx(
         ppo_runner.alg.actor_critic, normalizer=ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
     )
+
+    # -- optional activation analysis (after export) --
+    act_analyzer = None
+    if args_cli.analyze_activations:
+        act_analyzer = ActivationAnalyzer(ppo_runner.alg.actor_critic.actor)
+        print("[INFO] Activation analysis enabled — collecting hidden-layer statistics.")
 
     # -- Lap timing setup --
     quad_env = env.unwrapped
@@ -215,6 +313,11 @@ def main():
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
+
+    # -- Print activation analysis --
+    if act_analyzer is not None:
+        act_analyzer.report()
+        act_analyzer.cleanup()
 
     # -- Print lap summary --
     all_lap_times.extend(lap_times)

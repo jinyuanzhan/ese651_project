@@ -26,29 +26,26 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 # === Sweep axes ===
-gate_pass_values=(100 80 50)
-time_reward_values=(-0.3 -0.1)
-progress_values=(35 20 5)
+gate_pass_values=(50 60)
+time_reward_values=(-0.1 -0.08)
+progress_values=(15)
 
 # === Fixed parameters (pruned to best) ===
 EHP=0
 CUR=off
 PL=0
-ENF=false
 
 # === Paths ===
 SUMMARY_CSV="logs/rsl_rl/train_reward_trials_gate_metrics.csv"
 
 COMMON_ARGS=(
   --task Isaac-Quadcopter-Race-v0
-  --num_envs 8192
-  --max_iterations 800
+  --num_envs 4096
+  --max_iterations 1500
   --headless
   --seed 42
   --gate_metrics_summary_csv "$SUMMARY_CSV"
   --entry_half_plane_reward "$EHP"
-  --powerloop_corridor_reward "$PL"
-  --enforce_valid_powerloop_entry "$ENF"
   --disable_curriculum_reset
 )
 
@@ -62,7 +59,7 @@ echo "  Reward Tuning Grid Search v2 (pruned)"
 echo "  gate_pass:   ${gate_pass_values[*]}"
 echo "  time:        ${time_reward_values[*]}"
 echo "  progress:    ${progress_values[*]}"
-echo "  Fixed: ehp=$EHP, cur=$CUR, pl=$PL, enf=$ENF"
+echo "  Fixed: ehp=$EHP, cur=$CUR, pl=$PL"
 echo "  Total experiments: $total"
 echo "  Gate metrics CSV:  $SUMMARY_CSV"
 echo "=========================================="

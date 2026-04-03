@@ -218,19 +218,6 @@ class DefaultQuadcopterStrategy:
         # 9. Time penalty: constant per-step cost to encourage speed
         time_penalty = torch.ones(self.num_envs, device=self.device)
 
-        # 10. Powerloop corridor: penalize overshooting to gate 3's +X side
-        # (gate-frame y < 0). Corridor side gets 0 (no farming).
-        gate_y = self.env._pose_drone_wrt_gate[:, 1]
-        detour_extent = torch.clamp(-gate_y - 0.05, min=0.0)
-        powerloop_corridor = -torch.tanh(detour_extent / 0.5) * powerloop_mask.float()
-
-        # 11. Powerloop altitude: reward gaining altitude above gate height (0.75m)
-        # during the gate 2→3 segment. Encourages the "go up" phase of the loop.
-        altitude_above_gate = torch.clamp(
-            self.env._robot.data.root_link_pos_w[:, 2] - 0.75, min=0.0
-        )
-        powerloop_altitude = torch.tanh(altitude_above_gate / 1.5) * powerloop_mask.float()
-
         if self.cfg.is_train:
             rew = self.env.rew
             rewards = {
@@ -245,10 +232,6 @@ class DefaultQuadcopterStrategy:
             }
             if 'entry_half_plane_reward_scale' in rew:
                 rewards["entry_half_plane"] = entered_entry_half_plane * rew['entry_half_plane_reward_scale']
-            if 'powerloop_corridor_reward_scale' in rew:
-                rewards["powerloop_corridor"] = powerloop_corridor * rew['powerloop_corridor_reward_scale']
-            if 'powerloop_altitude_reward_scale' in rew:
-                rewards["powerloop_altitude"] = powerloop_altitude * rew['powerloop_altitude_reward_scale']
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             reward = torch.where(self.env.reset_terminated,
                                  torch.ones_like(reward) * rew['death_cost'], reward)
