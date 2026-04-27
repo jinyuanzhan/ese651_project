@@ -22,6 +22,25 @@ from rsl_rl.utils import store_code_state
 class OnPolicyRunner:
     """On-policy runner for training and evaluation."""
 
+    @staticmethod
+    def _obs_dict_from_data(obs_data):
+        if isinstance(obs_data, (tuple, list)):
+            obs_data = obs_data[0]
+        if isinstance(obs_data, TensorDict):
+            return dict(obs_data)
+        if isinstance(obs_data, dict):
+            return obs_data
+        return {"policy": obs_data}
+
+    @staticmethod
+    def _policy_obs_from_dict(obs_dict, num_envs: int, device: str):
+        if "policy" in obs_dict:
+            return obs_dict["policy"]
+        if "obs" in obs_dict:
+            return obs_dict["obs"]
+        keys = list(obs_dict.keys())
+        return obs_dict[keys[0]] if keys else torch.zeros(num_envs, 1, device=device)
+
     def __init__(self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device="cpu"):
         self.cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
@@ -34,20 +53,8 @@ class OnPolicyRunner:
         # New IsaacLab format - returns TensorDict
         obs_data = self.env.get_observations()
 
-        if isinstance(obs_data, TensorDict):
-            obs_dict = dict(obs_data)
-        else:
-            obs_dict = obs_data
-
-        # Extract main observation
-        if "policy" in obs_dict:
-            obs = obs_dict["policy"]
-        elif "obs" in obs_dict:
-            obs = obs_dict["obs"]
-        else:
-            # Use first observation as main
-            keys = list(obs_dict.keys())
-            obs = obs_dict[keys[0]] if keys else torch.zeros(self.env.num_envs, 1)
+        obs_dict = self._obs_dict_from_data(obs_data)
+        obs = self._policy_obs_from_dict(obs_dict, self.env.num_envs, self.env.device)
 
         # Create extras in expected format
         extras = {"observations": obs_dict}
@@ -134,19 +141,8 @@ class OnPolicyRunner:
         # New IsaacLab format - returns TensorDict
         obs_data = self.env.get_observations()
 
-        if isinstance(obs_data, TensorDict):
-            obs_dict = dict(obs_data)
-        else:
-            obs_dict = obs_data
-
-        # Extract main observation
-        if "policy" in obs_dict:
-            obs = obs_dict["policy"]
-        elif "obs" in obs_dict:
-            obs = obs_dict["obs"]
-        else:
-            keys = list(obs_dict.keys())
-            obs = obs_dict[keys[0]] if keys else torch.zeros(self.env.num_envs, 1)
+        obs_dict = self._obs_dict_from_data(obs_data)
+        obs = self._policy_obs_from_dict(obs_dict, self.env.num_envs, self.env.device)
 
         extras = {"observations": obs_dict}
         critic_obs = extras["observations"].get("critic", obs)
@@ -174,19 +170,8 @@ class OnPolicyRunner:
                     # Step environment
                     obs_data, rewards, dones, infos = self.env.step(actions.to(self.env.device))
 
-                    # New format - convert TensorDict to tensor
-                    if isinstance(obs_data, TensorDict):
-                        obs_dict = dict(obs_data)
-                    else:
-                        obs_dict = obs_data
-
-                    if "policy" in obs_dict:
-                        obs = obs_dict["policy"]
-                    elif "obs" in obs_dict:
-                        obs = obs_dict["obs"]
-                    else:
-                        keys = list(obs_dict.keys())
-                        obs = obs_dict[keys[0]] if keys else torch.zeros(self.env.num_envs, 1)
+                    obs_dict = self._obs_dict_from_data(obs_data)
+                    obs = self._policy_obs_from_dict(obs_dict, self.env.num_envs, self.env.device)
 
                     # Add observations to infos if not present
                     if "observations" not in infos:

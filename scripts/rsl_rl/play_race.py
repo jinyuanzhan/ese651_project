@@ -78,6 +78,14 @@ from isaaclab_rl.rsl_rl import (
 # Import extensions to set up environment tasks
 import src.isaac_quad_sim2real.tasks   # noqa: F401
 
+
+def _policy_obs(obs_data):
+    if isinstance(obs_data, (tuple, list)):
+        obs_data = obs_data[0]
+    if hasattr(obs_data, "get"):
+        return obs_data["policy"]
+    return obs_data
+
 # ---------------------------------------------------------------------------
 #  Activation analysis helper
 # ---------------------------------------------------------------------------
@@ -255,10 +263,7 @@ def main():
     prev_gates_passed = 0
 
     # reset environment
-    obs = env.get_observations()
-    # Extract tensor from TensorDict for policy
-    if hasattr(obs, "get"):  # Check if it's a TensorDict
-        obs = obs["policy"]  # Extract the policy observation
+    obs = _policy_obs(env.get_observations())
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
@@ -268,9 +273,7 @@ def main():
             actions = policy(obs)
             # env stepping
             obs, rewards, dones, infos = env.step(actions)
-            # Extract tensor from TensorDict for policy
-            if hasattr(obs, "get"):  # Check if it's a TensorDict
-                obs = obs["policy"]  # Extract the policy observation
+            obs = _policy_obs(obs)
         timestep += 1
 
         # -- Lap timing (env 0) --
