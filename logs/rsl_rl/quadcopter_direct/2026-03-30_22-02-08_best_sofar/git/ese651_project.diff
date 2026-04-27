@@ -1,0 +1,187 @@
+--- git status ---
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   scripts/rsl_rl/train_race.py
+	modified:   src/isaac_quad_sim2real/tasks/race/config/crazyflie/agents/rsl_rl_ppo_cfg.py
+	modified:   src/isaac_quad_sim2real/tasks/race/config/crazyflie/quadcopter_env.py
+	modified:   src/isaac_quad_sim2real/tasks/race/config/crazyflie/quadcopter_strategies.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	drone race.pdf
+	log.md
+	"\345\256\236\346\226\275\350\277\233\345\272\246\344\270\216\350\256\241\345\210\222\346\200\273\347\273\223.md"
+	"\346\210\252\345\261\2172026-03-29 18.02.43.png"
+	"\346\210\252\345\261\2172026-03-30 11.04.56.png"
+	"\350\247\202\346\265\213\347\251\272\351\227\264\350\256\276\350\256\241\345\210\206\346\236\220.md"
+	"\350\256\272\346\226\207\345\245\226\345\212\261\350\256\276\350\256\241\345\257\271\346\257\224\345\210\206\346\236\220.md"
+	"\350\257\276\347\250\213\345\255\246\344\271\240\350\256\276\350\256\241.md"
+	"\351\207\215\347\275\256\347\255\226\347\225\245\350\256\276\350\256\241\345\210\206\346\236\220.md"
+	"\351\241\271\347\233\256\345\205\263\351\224\256\346\226\207\344\273\266\346\200\273\347\273\223.md"
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/scripts/rsl_rl/train_race.py b/scripts/rsl_rl/train_race.py
+index d180208..5180dd9 100644
+--- a/scripts/rsl_rl/train_race.py
++++ b/scripts/rsl_rl/train_race.py
+@@ -113,16 +113,16 @@ torch.backends.cudnn.benchmark = False
+ 
+ REWARD_PRESETS = {
+     "baseline": {
+-        "gate_pass_reward_scale": 80.0,
+-        "progress_reward_scale": 10.0,
++        "gate_pass_reward_scale": 50.0,
++        "progress_reward_scale": 15,
+         "speed_reward_scale": 0,
+-        # "entry_half_plane_reward_scale": 3.0,
+-        # "crash_reward_scale": -5.0,
+-        "action_smooth_reward_scale": 0,
++        "entry_half_plane_reward_scale": 0,
++        "crash_reward_scale": 0,
++        "action_smooth_reward_scale":0,
+         # "altitude_reward_scale": -2.0,
+         # "lateral_reward_scale": 0.0,
+-        "time_reward_scale": -0.01, # time penalty
+-        "death_cost": -100.0,
++        "time_reward_scale": -0.08, # time penalty -0.15
++        "death_cost": -80.0,
+     },
+     # "trial1": {
+     #     "gate_pass_reward_scale": 80.0,
+diff --git a/src/isaac_quad_sim2real/tasks/race/config/crazyflie/agents/rsl_rl_ppo_cfg.py b/src/isaac_quad_sim2real/tasks/race/config/crazyflie/agents/rsl_rl_ppo_cfg.py
+index 1293bef..dffb193 100644
+--- a/src/isaac_quad_sim2real/tasks/race/config/crazyflie/agents/rsl_rl_ppo_cfg.py
++++ b/src/isaac_quad_sim2real/tasks/race/config/crazyflie/agents/rsl_rl_ppo_cfg.py
+@@ -10,7 +10,7 @@ from .rl_cfg import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgo
+ 
+ @configclass
+ class QuadcopterPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+-    num_steps_per_env = 24
++    num_steps_per_env = 24 #48
+     max_iterations = 200
+     save_interval = 50
+     experiment_name = "quadcopter_direct"
+@@ -28,7 +28,7 @@ class QuadcopterPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+         value_loss_coef=1.0,
+         use_clipped_value_loss=True,
+         clip_param=0.2,
+-        entropy_coef=0,
++        entropy_coef=0, #0.001
+         num_learning_epochs=5,
+         num_mini_batches=4,
+         learning_rate=3.0e-4,
+diff --git a/src/isaac_quad_sim2real/tasks/race/config/crazyflie/quadcopter_env.py b/src/isaac_quad_sim2real/tasks/race/config/crazyflie/quadcopter_env.py
+index 9477d9b..b1220a7 100644
+--- a/src/isaac_quad_sim2real/tasks/race/config/crazyflie/quadcopter_env.py
++++ b/src/isaac_quad_sim2real/tasks/race/config/crazyflie/quadcopter_env.py
+@@ -194,7 +194,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
+     min_altitude = 0.1
+     max_altitude = 3.0
+     max_time_on_ground = 1.5
+-    out_of_bounds_margin_xy = 6.0
++    out_of_bounds_margin_xy = 3.0
+ 
+     # motor dynamics
+     arm_length = 0.043
+@@ -687,14 +687,15 @@ class QuadcopterEnv(DirectRLEnv):
+         cond_max_h = self._robot.data.root_link_pos_w[:, 2] > self.cfg.max_altitude
+ 
+         # self._crashed is computed in get_rewards() in quadcopter_strategies.py.
+-        cond_crashed = self._crashed > 10
++        cond_crashed = self._crashed > 1
+ 
+         #TODO ----- START ----- [OPTIONAL]
+-        # Consider adding additional _get_dones() conditions to influence training. Note that the additional conditions
+-        # will not be used during runtime for the official class race.
+-        # Temporary debugging rollback: keep the boundary bookkeeping/logging path,
+-        # but do not terminate training episodes due to x/y out-of-bounds.
+-        cond_out_of_bounds_xy = torch.zeros_like(cond_max_h)
++        # Terminate if drone flies outside the track bounding box + margin.
++        drone_xy = self._robot.data.root_link_pos_w[:, :2]
++        cond_out_of_bounds_xy = (
++            (drone_xy < self._bounds_min_xy).any(dim=1)
++            | (drone_xy > self._bounds_max_xy).any(dim=1)
++        )
+         #TODO ----- END ----- [OPTIONAL]
+         self._out_of_bounds[:] = cond_out_of_bounds_xy
+ 
+diff --git a/src/isaac_quad_sim2real/tasks/race/config/crazyflie/quadcopter_strategies.py b/src/isaac_quad_sim2real/tasks/race/config/crazyflie/quadcopter_strategies.py
+index 69124ca..06de408 100644
+--- a/src/isaac_quad_sim2real/tasks/race/config/crazyflie/quadcopter_strategies.py
++++ b/src/isaac_quad_sim2real/tasks/race/config/crazyflie/quadcopter_strategies.py
+@@ -118,10 +118,12 @@ class DefaultQuadcopterStrategy:
+ 
+         # ---- Gate passage detection via gate-frame x-axis crossing ----
+         # Gate frame x-axis = gate normal (opposite to passing direction).
+-        # Drone approaches with x > 0, passes through when x crosses to <= 0.
++        # Drone approaches with x > 0, passes through when x crosses to <= threshold.
++        # A small positive threshold (0.1m) counts as passed slightly before the YOZ plane.
++        gate_pass_x_threshold = 0.1
+         current_x = self.env._pose_drone_wrt_gate[:, 0]
+         prev_x = self.env._prev_x_drone_wrt_gate
+-        x_crossed = (prev_x > 0) & (current_x <= 0)
++        x_crossed = (prev_x > gate_pass_x_threshold) & (current_x <= gate_pass_x_threshold)
+ 
+         # Check drone is within the gate opening (gate_side=1.0 => ±0.5m)
+         yz = self.env._pose_drone_wrt_gate[:, 1:3]
+@@ -173,26 +175,27 @@ class DefaultQuadcopterStrategy:
+         speed = torch.linalg.norm(vel_world, dim=1)
+         speed_reward = torch.tanh(speed / 3.0)
+ 
+-        # # 4.5 Entry-side shaping: reward returning to the valid entry half-plane for tight
+-        # # same-direction gate pairs (e.g. gate 2 -> gate 3 in powerloop).
+-        # current_gate_mask = self._half_plane_shape_gate_mask[self.env._idx_wp]
+-        # in_entry_half_plane = self.env._pose_drone_wrt_gate[:, 0] > 0.15
+-        # near_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate[:, :2], dim=1) < 2.0
+-        # entered_entry_half_plane = (
+-        #     current_gate_mask
+-        #     & near_gate
+-        #     & (~self._entry_half_plane_rewarded)
+-        #     & (~self._prev_in_entry_half_plane)
+-        #     & in_entry_half_plane
+-        # ).float()
+-        # self._prev_in_entry_half_plane[:] = in_entry_half_plane
+-        # self._entry_half_plane_rewarded |= entered_entry_half_plane.bool()
+-
+-        # 5. Crash detection feeds only termination/death_cost, not a dense reward term.
++        # 4.5 Entry-side shaping: reward returning to the valid entry half-plane for tight
++        # same-direction gate pairs (e.g. gate 2 -> gate 3 in powerloop).
++        current_gate_mask = self._half_plane_shape_gate_mask[self.env._idx_wp]
++        in_entry_half_plane = self.env._pose_drone_wrt_gate[:, 0] > 0.15
++        near_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate[:, :2], dim=1) < 2.0
++        entered_entry_half_plane = (
++            current_gate_mask
++            & near_gate
++            & (~self._entry_half_plane_rewarded)
++            & (~self._prev_in_entry_half_plane)
++            & in_entry_half_plane
++        ).float()
++        self._prev_in_entry_half_plane[:] = in_entry_half_plane
++        self._entry_half_plane_rewarded |= entered_entry_half_plane.bool()
++
++        # 5. Crash detection: dense penalty per contact + termination after threshold.
+         contact_forces = self.env._contact_sensor.data.net_forces_w
+         contact_detected = (torch.norm(contact_forces, dim=-1) > 1e-8).squeeze(1)
+         mask = self.env.episode_length_buf > 100
+         self.env._crashed = self.env._crashed + (contact_detected & mask).int()
++        crash_penalty = (contact_detected & mask).float()
+ 
+         # 6. Action smoothness: penalize large action changes
+         action_diff = self.env._actions - self._prev_step_actions
+@@ -216,7 +219,8 @@ class DefaultQuadcopterStrategy:
+                 "gate_pass":     gate_pass * rew['gate_pass_reward_scale'],
+                 "progress":      progress * rew['progress_reward_scale'],
+                 "speed":         speed_reward * rew['speed_reward_scale'],
+-                # "entry_half_plane": entered_entry_half_plane * rew['entry_half_plane_reward_scale'],
++                "entry_half_plane": entered_entry_half_plane * rew['entry_half_plane_reward_scale'],
++                "crash":         crash_penalty * rew['crash_reward_scale'],
+                 "action_smooth": action_smooth * rew['action_smooth_reward_scale'],
+                 # "altitude":      altitude_penalty * rew['altitude_reward_scale'],
+                 # "lateral":       lateral_penalty * rew['lateral_reward_scale'],

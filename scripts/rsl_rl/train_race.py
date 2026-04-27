@@ -56,7 +56,7 @@ parser.add_argument(
     "--reward_set",
     type=str,
     default="baseline",
-    choices={"baseline", "trial1", "trial2"},
+    choices={"baseline", "trial1", "trial2", "circle_safe"},
     help="Reward preset to use for training.",
 )
 parser.add_argument(
@@ -73,6 +73,9 @@ parser.add_argument("--time_reward", type=float, default=None, help="Override ti
 parser.add_argument("--crash_reward", type=float, default=None, help="Override crash_reward_scale.")
 parser.add_argument("--death_cost", type=float, default=None, help="Override death_cost.")
 parser.add_argument("--entry_half_plane_reward", type=float, default=None, help="Override entry_half_plane_reward_scale.")
+parser.add_argument("--vel_align_reward", type=float, default=None, help="Override vel_align_reward_scale.")
+parser.add_argument("--gate_center_reward", type=float, default=None, help="Override gate_center_reward_scale.")
+parser.add_argument("--attitude_reward", type=float, default=None, help="Override attitude_reward_scale.")
 # PPO hyperparameter overrides
 parser.add_argument("--gamma", type=float, default=None, help="Override discount factor gamma.")
 parser.add_argument(
@@ -141,16 +144,31 @@ torch.backends.cudnn.benchmark = False
 
 REWARD_PRESETS = {
     "baseline": {
-        "gate_pass_reward_scale": 50.0,     # 过门是核心目标，给强激励
-    "progress_reward_scale": 15,         # 朝门飞的 dense shaping
-        "speed_reward_scale": 0,           # 奖励高速飞行
-        "entry_half_plane_reward_scale": 0,  # 一次性奖励回到 gate3 的有效进入半平面（+Y 侧）
+        "gate_pass_reward_scale": 50.0,
+        "progress_reward_scale": 15,
+        "speed_reward_scale": 0,
+        "entry_half_plane_reward_scale": 0,
         "crash_reward_scale": 0,
-      "action_smooth_reward_scale": 0,
-        # "altitude_reward_scale": -2.0,
-        # "lateral_reward_scale": 0.0,
-        "time_reward_scale": -0.08,          # 每步惩罚，让慢飞代价高
+        "action_smooth_reward_scale": 0,
+        "time_reward_scale": -0.08,
         "death_cost": -80.0,
+    },
+    # Phase 2 Stage 1: Circle Track zero-shot. Intentionally safe and slow
+    # to narrow the sim2real observation gap before chasing lap times.
+    "circle_safe": {
+        "gate_pass_reward_scale": 30.0,      # 适中：驱动过门但不刺激激进飞行
+        "progress_reward_scale": 10.0,       # dense shaping 朝门飞
+        "speed_reward_scale": 0,
+        "vel_align_reward_scale": 0,         # 关闭：避免与 progress 重复、训练更平静
+        "entry_half_plane_reward_scale": 0,  # circle 四门间距 > 2m，不需要
+        "crash_reward_scale": -7.0,           # 强惩罚碰撞
+        "action_smooth_reward_scale": -0.10, # 重点：抑制抖动，sim2real 关键
+        "time_reward_scale": 0,          # 弱时间惩罚，不鼓励冲刺
+        "death_cost": -50.0,
+        # New: aim for the red-dot gate center (3D exponential attractor, sigma=0.5m)
+        "gate_center_reward_scale": 0,
+        # New: penalize large roll + pitch tilts (radians). Yaw not penalized.
+        "attitude_reward_scale": -0.05,
     },
     # "trial1": {
     #     "gate_pass_reward_scale": 80.0,
@@ -240,6 +258,7 @@ def _append_training_gate_metric_summary_csv(csv_path: str, summary: dict):
         "crash_reward_scale": rewards.get("crash_reward_scale"),
         "action_smooth_reward_scale": rewards.get("action_smooth_reward_scale"),
         "entry_half_plane_reward_scale": rewards.get("entry_half_plane_reward_scale"),
+        "vel_align_reward_scale": rewards.get("vel_align_reward_scale"),
         "powerloop_altitude_reward_scale": rewards.get("powerloop_altitude_reward_scale"),
         "death_cost": rewards.get("death_cost"),
         "best_iteration": summary["episode_metrics"].get("best_iteration"),
@@ -326,6 +345,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "crash_reward_scale": args_cli.crash_reward,
         "death_cost": args_cli.death_cost,
         "entry_half_plane_reward_scale": args_cli.entry_half_plane_reward,
+        "vel_align_reward_scale": args_cli.vel_align_reward,
+        "gate_center_reward_scale": args_cli.gate_center_reward,
+        "attitude_reward_scale": args_cli.attitude_reward,
     }
     for key, val in _reward_overrides.items():
         if val is not None:
