@@ -11,7 +11,7 @@ import torch
 import numpy as np
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
-from isaaclab.utils.math import subtract_frame_transforms, quat_from_euler_xyz, euler_xyz_from_quat, wrap_to_pi, matrix_from_quat, quat_apply_inverse
+from isaaclab.utils.math import subtract_frame_transforms, quat_from_euler_xyz, euler_xyz_from_quat, wrap_to_pi, matrix_from_quat
 
 if TYPE_CHECKING:
     from .quadcopter_env import QuadcopterEnv
@@ -304,10 +304,9 @@ class DefaultQuadcopterStrategy:
         """
         corners_w = self._gate_corners_world[gate_indices]          # (N, 4, 3)
         corners_rel = corners_w - drone_pos_w.unsqueeze(1)          # (N, 4, 3)
-        N = drone_quat_w.shape[0]
-        quat_exp = drone_quat_w.unsqueeze(1).expand(-1, 4, -1).reshape(N * 4, 4)
-        corners_body = quat_apply_inverse(quat_exp, corners_rel.reshape(N * 4, 3))
-        return corners_body.reshape(N, 12)
+        rot_wb = matrix_from_quat(drone_quat_w)                     # (N, 3, 3), body to world
+        corners_body = torch.einsum("nci,nij->ncj", corners_rel, rot_wb)
+        return corners_body.reshape(drone_quat_w.shape[0], 12)
 
     def get_observations(self) -> Dict[str, torch.Tensor]:
         """Get observations: O_ego (12 or 15D) + O_env (24D).
