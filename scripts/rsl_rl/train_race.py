@@ -150,6 +150,7 @@ REWARD_PRESETS = {
         "entry_half_plane_reward_scale": 0,
         "crash_reward_scale": 0,
         "action_smooth_reward_scale": 0,
+        "gate3_center_reward_scale": 0.5,
         "time_reward_scale": -0.08,
         "death_cost": -80.0,
     },

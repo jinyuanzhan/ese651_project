@@ -49,6 +49,8 @@ class DefaultQuadcopterStrategy:
             self.num_envs, self._num_gates, dtype=torch.float, device=self.device
         )
         self._progress_distance_scale = 3.0
+        self._gate3_aux_center_w = torch.tensor([1.6, 0.0, 0.75], device=self.device)
+        self._gate3_aux_center_sigma = 0.6
 
         # Domain randomization of physics parameters for sim-to-real transfer
         # Evaluation alters TWR ±5%, aero drag 0.5-2x, PID ±15%/30%
@@ -248,7 +250,17 @@ class DefaultQuadcopterStrategy:
         dist_to_red_dot = torch.linalg.norm(self.env._pose_drone_wrt_gate, dim=1)
         gate_center_reward = torch.exp(-2.0 * dist_to_red_dot)
 
-        # 11. Attitude penalty: penalize large roll and pitch tilts (radians).
+        # 11. Gate-3 auxiliary center: pull the powerloop gate-3 approach toward
+        # a safer world-space point before crossing, without constraining yaw.
+        if self.env.cfg.track_name == "powerloop":
+            gate3_aux_mask = self.env._idx_wp == 3
+        else:
+            gate3_aux_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        gate3_aux_dist = torch.linalg.norm(drone_pos - self._gate3_aux_center_w.unsqueeze(0), dim=1)
+        gate3_center_reward = torch.exp(-((gate3_aux_dist / self._gate3_aux_center_sigma) ** 2))
+        gate3_center_reward = gate3_center_reward * gate3_aux_mask.float()
+
+        # 12. Attitude penalty: penalize large roll and pitch tilts (radians).
         # Yaw is intentionally NOT penalized — the drone must rotate its heading
         # around the circle track.
         drone_quat_w = self.env._robot.data.root_quat_w
@@ -275,6 +287,8 @@ class DefaultQuadcopterStrategy:
                 rewards["entry_half_plane"] = entered_entry_half_plane * rew['entry_half_plane_reward_scale']
             if 'gate_center_reward_scale' in rew:
                 rewards["gate_center"] = gate_center_reward * rew['gate_center_reward_scale']
+            if 'gate3_center_reward_scale' in rew:
+                rewards["gate3_center"] = gate3_center_reward * rew['gate3_center_reward_scale']
             if 'attitude_reward_scale' in rew:
                 rewards["attitude"] = attitude_penalty * rew['attitude_reward_scale']
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
