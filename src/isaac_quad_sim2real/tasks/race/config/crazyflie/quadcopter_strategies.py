@@ -49,7 +49,7 @@ class DefaultQuadcopterStrategy:
             self.num_envs, self._num_gates, dtype=torch.float, device=self.device
         )
         self._progress_distance_scale = 3.0
-        self._gate3_aux_center_w = torch.tensor([1.6, 0.0, 0.75], device=self.device)
+        self._gate3_aux_center_w = torch.tensor([1.9, 0.0, 0.75], device=self.device)
         self._gate3_aux_center_sigma = 0.6
 
         # Domain randomization of physics parameters for sim-to-real transfer
