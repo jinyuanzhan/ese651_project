@@ -18,9 +18,3 @@
 **/runs/*
 **/logs/*
 **/recordings/*
-
-# Large binaries / reference PDFs (kept locally only)
-*.mov
-*.pdf
-.codex
-Untitled
