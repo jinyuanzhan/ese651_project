@@ -160,7 +160,7 @@ class PPO:
                     advantage_estimates.std() + 1e-8
                 )
 
-            # Compute importance sampling ratio: r(θ) = π_θ(a|s) / π_θ_old(a|s)
+            # Compute importance sampling ratio
             ratio = torch.exp(new_log_probs - prev_log_probs.squeeze(-1))
 
             # Clipped surrogate objective
